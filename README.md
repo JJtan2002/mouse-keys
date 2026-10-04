@@ -2,12 +2,19 @@
 
 A small Windows tool that lets you use your keyboard as a mouse. It's made for keyboards **without a number pad**, where the built-in Windows Mouse Keys feature doesn't work.
 
-There's nothing to install beyond Python 3. It uses only the standard library (`ctypes` to call the Windows API).
+Available as both a **pure Python script** (zero install beyond Python) and a **native Win32 C implementation** (standalone 24 KB binary, < 1 MB private memory).
 
 ## Usage
 
-Double-click `run_mouse_keys.bat`, or run:
+### Option 1: Native C Executable (Recommended for lowest latency & memory)
+Compile with GCC or Clang:
+```powershell
+gcc -O2 -s -o mouse_keys.exe mouse_keys.c
+.\mouse_keys.exe
+```
 
+### Option 2: Python Script
+Double-click `run_mouse_keys.bat`, or run:
 ```powershell
 py mouse_keys.py
 ```
