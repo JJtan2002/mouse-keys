@@ -38,3 +38,7 @@ Edit the `CONFIG` section at the top of `mouse_keys.py`:
 
 - Clicks won't reach programs running as administrator unless you also run this script as administrator (a Windows restriction).
 - To start it automatically when you log in, put a shortcut to `run_mouse_keys.bat` in `shell:startup`.
+
+## License
+
+MIT - see [LICENSE](LICENSE).
