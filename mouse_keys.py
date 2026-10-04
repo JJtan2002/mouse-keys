@@ -5,7 +5,9 @@ No third-party packages needed: uses a low-level keyboard hook + SendInput via c
 
 Default controls
 ----------------
-  F8            Toggle MOUSE MODE on/off (high beep = on, low beep = off)
+  Tap Shift     Toggle MOUSE MODE on/off (high beep = on, low beep = off)
+                (press and release Shift ON ITS OWN, quickly - Shift+letter for
+                 capitals, Shift+click etc. never toggle)
   Shift+F8      Quit
 
   While MOUSE MODE is ON:
@@ -30,9 +32,13 @@ VK = {  # virtual-key codes: https://learn.microsoft.com/windows/win32/inputdev/
     "F8": 0x77, "ENTER": 0x0D, "Z": 0x5A, "X": 0x58, "C": 0x43,
     "LEFT": 0x25, "UP": 0x26, "RIGHT": 0x27, "DOWN": 0x28,
     "PGUP": 0x21, "PGDN": 0x22, "SHIFT": 0x10,
+    "LSHIFT": 0xA0, "RSHIFT": 0xA1,
 }
 
-TOGGLE_KEY = VK["F8"]
+TOGGLE_KEYS = {VK["LSHIFT"], VK["RSHIFT"]}  # tap either Shift alone to toggle
+                                            # (use {VK["RSHIFT"]} for Right Shift only)
+TAP_MAX_SECONDS = 0.35      # Shift must be released within this time to count as a tap
+QUIT_KEY = VK["F8"]         # Shift + this key quits
 BUTTON_KEYS = {             # key -> mouse button
     VK["ENTER"]: "left",
     VK["X"]: "right",
@@ -60,7 +66,10 @@ kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 LRESULT = ctypes.c_ssize_t
 ULONG_PTR = ctypes.c_size_t
 WH_KEYBOARD_LL = 13
+WH_MOUSE_LL = 14
 WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP = 0x100, 0x101, 0x104, 0x105
+# real mouse clicks / wheel; used to cancel a Shift tap (Shift+click must not toggle)
+MOUSE_ACTION_MSGS = {0x201, 0x204, 0x207, 0x20A, 0x20B, 0x20E}
 LLKHF_INJECTED = 0x10
 INPUT_MOUSE = 0
 MOUSEEVENTF_MOVE, MOUSEEVENTF_WHEEL = 0x0001, 0x0800
@@ -124,8 +133,14 @@ class MouseKeys:
         self.held = set()          # mapped keys currently held (for auto-repeat filtering)
         self.running = True
         self.main_thread_id = kernel32.GetCurrentThreadId()
-        self._proc = HOOKPROC(self._hook)   # keep a reference so it isn't garbage-collected
-        self.hook = None
+        # keep references so the callbacks aren't garbage-collected
+        self._proc = HOOKPROC(self._hook)
+        self._mouse_proc = HOOKPROC(self._mouse_hook)
+        self.hook = self.mouse_hook = None
+        # Shift-tap detection
+        self.tap_key = None        # which Shift is currently down (None = none)
+        self.tap_time = 0.0        # when it went down
+        self.tap_clean = False     # still "alone"? (no other key / click since)
 
     # ---------- state helpers ----------
     def release_all(self):
@@ -141,7 +156,7 @@ class MouseKeys:
         print(f"Mouse mode: {'ON ' if on else 'OFF'}", flush=True)
         beep(1200 if on else 600)
 
-    # ---------- keyboard hook ----------
+    # ---------- hooks ----------
     def _hook(self, n_code, w_param, l_param):
         if n_code == 0:
             kb = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
@@ -150,16 +165,34 @@ class MouseKeys:
                     return 1  # swallow the key
         return user32.CallNextHookEx(None, n_code, w_param, l_param)
 
-    def _handle(self, vk, down):
-        if vk == TOGGLE_KEY:
-            if down and vk not in self.held:
-                self.held.add(vk)
-                if user32.GetAsyncKeyState(VK["SHIFT"]) & 0x8000:
-                    self.quit()
-                else:
+    def _mouse_hook(self, n_code, w_param, l_param):
+        # Kept minimal: it runs for every mouse event. Only cares about clicks/wheel while Shift is down.
+        if n_code == 0 and self.tap_key is not None and w_param in MOUSE_ACTION_MSGS:
+            self.tap_clean = False
+        return user32.CallNextHookEx(None, n_code, w_param, l_param)
+
+    def _track_tap(self, vk, down):
+        """Toggle mouse mode when a Shift key is pressed and released on its own, quickly."""
+        if vk in TOGGLE_KEYS:
+            if down:
+                if self.tap_key is None:            # first press (ignore auto-repeat)
+                    self.tap_key, self.tap_time, self.tap_clean = vk, time.monotonic(), True
+                elif vk != self.tap_key:            # other Shift pressed too -> not a tap
+                    self.tap_clean = False
+            elif vk == self.tap_key:
+                if self.tap_clean and time.monotonic() - self.tap_time <= TAP_MAX_SECONDS:
                     self.set_enabled(not self.enabled)
-            elif not down:
-                self.held.discard(vk)
+                self.tap_key = None
+        elif down:
+            self.tap_clean = False                  # any other key -> it was Shift+key, not a tap
+
+    def _handle(self, vk, down):
+        self._track_tap(vk, down)
+        if vk in TOGGLE_KEYS:
+            return False                            # Shift always reaches apps (capitals etc.)
+
+        if vk == QUIT_KEY and down and user32.GetAsyncKeyState(VK["SHIFT"]) & 0x8000:
+            self.quit()
             return True
 
         if not self.enabled:
@@ -215,15 +248,19 @@ class MouseKeys:
         user32.PostThreadMessageW(self.main_thread_id, 0x0012, 0, 0)  # WM_QUIT
 
     def run(self):
-        self.hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._proc,
-                                             kernel32.GetModuleHandleW(None), 0)
+        h_mod = kernel32.GetModuleHandleW(None)
+        self.hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._proc, h_mod, 0)
         if not self.hook:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.mouse_hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._mouse_proc, h_mod, 0)
+        if not self.mouse_hook:
             raise ctypes.WinError(ctypes.get_last_error())
         threading.Thread(target=self._move_loop, daemon=True).start()
 
         print(__doc__)
         print(f"Running. Mouse mode: {'ON' if self.enabled else 'OFF'}  "
-              f"(F8 toggle, Shift+F8 quit, pass-through {'ON' if PASS_THROUGH else 'OFF'})", flush=True)
+              f"(tap Shift to toggle, Shift+F8 to quit, pass-through {'ON' if PASS_THROUGH else 'OFF'})",
+              flush=True)
 
         msg = wintypes.MSG()
         try:
@@ -234,6 +271,7 @@ class MouseKeys:
             self.running = False
             self.release_all()
             user32.UnhookWindowsHookEx(self.hook)
+            user32.UnhookWindowsHookEx(self.mouse_hook)
 
 
 if __name__ == "__main__":
