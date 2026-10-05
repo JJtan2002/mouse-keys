@@ -11,13 +11,13 @@ Default controls
   Shift+F8      Quit
 
   While MOUSE MODE is ON:
-  Enter         Left click   (hold to drag)
+  Z             Left click   (hold to drag)
   X             Right click
   C             Middle click
-  Arrow keys    Move the cursor (accelerates while held)
+  W / A / S / D Move the cursor (accelerates while held)
   PageUp/Down   Scroll wheel up/down
 
-With PASS_THROUGH on, mapped keys also keep their normal function (Enter still presses Enter).
+With PASS_THROUGH on, mapped keys also keep their normal function.
 Edit the CONFIG section below to change any binding.
 """
 
@@ -30,23 +30,33 @@ from ctypes import wintypes
 # ============================== CONFIG ==============================
 VK = {  # virtual-key codes: https://learn.microsoft.com/windows/win32/inputdev/virtual-key-codes
     "F8": 0x77, "ENTER": 0x0D, "Z": 0x5A, "X": 0x58, "C": 0x43,
+    "W": 0x57, "A": 0x41, "S": 0x53, "D": 0x44,
     "LEFT": 0x25, "UP": 0x26, "RIGHT": 0x27, "DOWN": 0x28,
-    "PGUP": 0x21, "PGDN": 0x22, "SHIFT": 0x10,
+    "PGUP": 0x21, "PGDN": 0x22, "SHIFT": 0x10, "CONTROL": 0x11,
     "LSHIFT": 0xA0, "RSHIFT": 0xA1,
+    "LCONTROL": 0xA2, "RCONTROL": 0xA3,
 }
 
-TOGGLE_KEYS = {VK["LSHIFT"], VK["RSHIFT"]}  # tap either Shift alone to toggle
-                                            # (use {VK["RSHIFT"]} for Right Shift only)
-TAP_MAX_SECONDS = 0.35      # Shift must be released within this time to count as a tap
+TOGGLE_KEYS = {VK["LSHIFT"], VK["RSHIFT"]}      # tap Shift to toggle mouse mode
+PROFILE_KEYS = {VK["LCONTROL"], VK["RCONTROL"]} # tap Ctrl to switch WASD <-> Arrows
+TAP_MAX_SECONDS = 0.35      # Key must be released within this time to count as a tap
 QUIT_KEY = VK["F8"]         # Shift + this key quits
-BUTTON_KEYS = {             # key -> mouse button
-    VK["ENTER"]: "left",
+
+PROFILES = {
+    "WASD": {
+        "move": {VK["A"]: (-1, 0), VK["D"]: (1, 0), VK["W"]: (0, -1), VK["S"]: (0, 1)},
+        "left_click": VK["Z"],
+    },
+    "ARROWS": {
+        "move": {VK["LEFT"]: (-1, 0), VK["RIGHT"]: (1, 0), VK["UP"]: (0, -1), VK["DOWN"]: (0, 1)},
+        "left_click": VK["ENTER"],
+    },
+}
+DEFAULT_PROFILE = "WASD"
+
+SHARED_BUTTON_KEYS = {
     VK["X"]: "right",
     VK["C"]: "middle",
-}
-MOVE_KEYS = {               # key -> (dx, dy) direction
-    VK["LEFT"]: (-1, 0), VK["RIGHT"]: (1, 0),
-    VK["UP"]: (0, -1), VK["DOWN"]: (0, 1),
 }
 SCROLL_KEYS = {VK["PGUP"]: 120, VK["PGDN"]: -120}
 
@@ -55,8 +65,7 @@ MAX_SPEED = 25.0            # pixels per tick cap
 ACCEL = 0.5                 # speed gained per tick while held
 TICK = 0.010                # seconds between movement updates
 BEEP = True                 # audible feedback when toggling
-PASS_THROUGH = True         # True: mapped keys ALSO type normally (e.g. Z types "z" AND clicks)
-                            # False: mapped keys are swallowed and only act as the mouse
+PASS_THROUGH = True         # True: mapped keys ALSO type normally
 START_ENABLED = False       # True: mouse mode is already ON when the script starts
 # ====================================================================
 
@@ -130,6 +139,7 @@ def beep(freq):
 class MouseKeys:
     def __init__(self):
         self.enabled = START_ENABLED
+        self.profile = DEFAULT_PROFILE
         self.held = set()          # mapped keys currently held (for auto-repeat filtering)
         self.running = True
         self.main_thread_id = kernel32.GetCurrentThreadId()
@@ -137,24 +147,51 @@ class MouseKeys:
         self._proc = HOOKPROC(self._hook)
         self._mouse_proc = HOOKPROC(self._mouse_hook)
         self.hook = self.mouse_hook = None
-        # Shift-tap detection
-        self.tap_key = None        # which Shift is currently down (None = none)
+        # Shift / Ctrl tap detection
+        self.tap_key = None        # which modifier is currently tracked (None = none)
+        self.tap_type = None       # "toggle" (Shift) or "profile" (Ctrl)
         self.tap_time = 0.0        # when it went down
         self.tap_clean = False     # still "alone"? (no other key / click since)
 
+    @property
+    def move_keys(self):
+        return PROFILES[self.profile]["move"]
+
+    @property
+    def button_keys(self):
+        bk = dict(SHARED_BUTTON_KEYS)
+        bk[PROFILES[self.profile]["left_click"]] = "left"
+        return bk
+
     # ---------- state helpers ----------
     def release_all(self):
+        bkeys = self.button_keys
         for vk in list(self.held):
-            if vk in BUTTON_KEYS:
-                send_mouse(BUTTON_FLAGS[BUTTON_KEYS[vk]][1])
+            if vk in bkeys:
+                send_mouse(BUTTON_FLAGS[bkeys[vk]][1])
         self.held.clear()
 
     def set_enabled(self, on):
         if not on:
             self.release_all()
         self.enabled = on
-        print(f"Mouse mode: {'ON ' if on else 'OFF'}", flush=True)
+        print(f"Mouse mode: {'ON ' if on else 'OFF'} [{self.profile}]", flush=True)
         beep(1200 if on else 600)
+
+    def switch_profile(self):
+        self.release_all()
+        self.profile = "ARROWS" if self.profile == "WASD" else "WASD"
+        print(f"Movement profile switched to: [{self.profile}] "
+              f"({'Z=Click, WASD=Move' if self.profile == 'WASD' else 'Enter=Click, Arrows=Move'})",
+              flush=True)
+        if BEEP:
+            # Audible distinction: WASD = high double beep; ARROWS = low double beep
+            freq = 1400 if self.profile == "WASD" else 800
+            def _double_beep():
+                winsound.Beep(freq, 70)
+                time.sleep(0.04)
+                winsound.Beep(freq, 70)
+            threading.Thread(target=_double_beep, daemon=True).start()
 
     # ---------- hooks ----------
     def _hook(self, n_code, w_param, l_param):
@@ -166,30 +203,38 @@ class MouseKeys:
         return user32.CallNextHookEx(None, n_code, w_param, l_param)
 
     def _mouse_hook(self, n_code, w_param, l_param):
-        # Kept minimal: it runs for every mouse event. Only cares about clicks/wheel while Shift is down.
+        # Kept minimal: cancel any tap if a real mouse click/scroll occurs while holding Shift/Ctrl
         if n_code == 0 and self.tap_key is not None and w_param in MOUSE_ACTION_MSGS:
             self.tap_clean = False
         return user32.CallNextHookEx(None, n_code, w_param, l_param)
 
     def _track_tap(self, vk, down):
-        """Toggle mouse mode when a Shift key is pressed and released on its own, quickly."""
-        if vk in TOGGLE_KEYS:
+        """Detect quick solo tap of Shift (toggle mouse mode) or Ctrl (switch profile)."""
+        is_toggle = vk in TOGGLE_KEYS
+        is_profile = vk in PROFILE_KEYS
+
+        if is_toggle or is_profile:
+            t_type = "toggle" if is_toggle else "profile"
             if down:
-                if self.tap_key is None:            # first press (ignore auto-repeat)
-                    self.tap_key, self.tap_time, self.tap_clean = vk, time.monotonic(), True
-                elif vk != self.tap_key:            # other Shift pressed too -> not a tap
+                if self.tap_key is None:
+                    self.tap_key, self.tap_type, self.tap_time, self.tap_clean = vk, t_type, time.monotonic(), True
+                elif vk != self.tap_key:
                     self.tap_clean = False
             elif vk == self.tap_key:
                 if self.tap_clean and time.monotonic() - self.tap_time <= TAP_MAX_SECONDS:
-                    self.set_enabled(not self.enabled)
-                self.tap_key = None
+                    if self.tap_type == "toggle":
+                        self.set_enabled(not self.enabled)
+                    elif self.tap_type == "profile":
+                        self.switch_profile()
+                self.tap_key = self.tap_type = None
         elif down:
-            self.tap_clean = False                  # any other key -> it was Shift+key, not a tap
+            self.tap_clean = False
 
     def _handle(self, vk, down):
         self._track_tap(vk, down)
-        if vk in TOGGLE_KEYS:
-            return False                            # Shift always reaches apps (capitals etc.)
+        # Shift and Ctrl always pass through to applications
+        if vk in TOGGLE_KEYS or vk in PROFILE_KEYS:
+            return False
 
         if vk == QUIT_KEY and down and user32.GetAsyncKeyState(VK["SHIFT"]) & 0x8000:
             self.quit()
@@ -198,8 +243,9 @@ class MouseKeys:
         if not self.enabled:
             return False
 
-        if vk in BUTTON_KEYS:
-            down_flag, up_flag = BUTTON_FLAGS[BUTTON_KEYS[vk]]
+        bkeys = self.button_keys
+        if vk in bkeys:
+            down_flag, up_flag = BUTTON_FLAGS[bkeys[vk]]
             if down and vk not in self.held:
                 self.held.add(vk)
                 send_mouse(down_flag)
@@ -208,7 +254,8 @@ class MouseKeys:
                 send_mouse(up_flag)
             return not PASS_THROUGH
 
-        if vk in MOVE_KEYS:
+        mkeys = self.move_keys
+        if vk in mkeys:
             (self.held.add if down else self.held.discard)(vk)
             return not PASS_THROUGH
 
@@ -224,8 +271,9 @@ class MouseKeys:
         speed = START_SPEED
         carry_x = carry_y = 0.0
         while self.running:
-            dx = sum(MOVE_KEYS[k][0] for k in list(self.held) if k in MOVE_KEYS)
-            dy = sum(MOVE_KEYS[k][1] for k in list(self.held) if k in MOVE_KEYS)
+            mkeys = self.move_keys
+            dx = sum(mkeys[k][0] for k in list(self.held) if k in mkeys)
+            dy = sum(mkeys[k][1] for k in list(self.held) if k in mkeys)
             if self.enabled and (dx or dy):
                 carry_x += dx * speed
                 carry_y += dy * speed
@@ -258,8 +306,8 @@ class MouseKeys:
         threading.Thread(target=self._move_loop, daemon=True).start()
 
         print(__doc__)
-        print(f"Running. Mouse mode: {'ON' if self.enabled else 'OFF'}  "
-              f"(tap Shift to toggle, Shift+F8 to quit, pass-through {'ON' if PASS_THROUGH else 'OFF'})",
+        print(f"Running. Mouse mode: {'ON' if self.enabled else 'OFF'} [{self.profile}]  "
+              f"(tap Shift=toggle, tap Ctrl=switch WASD/Arrows, Shift+F8=quit)",
               flush=True)
 
         msg = wintypes.MSG()

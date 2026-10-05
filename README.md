@@ -22,16 +22,19 @@ py mouse_keys.py
 | Key | Action |
 |---|---|
 | **Tap Shift** (on its own) | Turn mouse mode on/off (high beep = on, low beep = off) |
-| **Shift+F8** | Quit |
-| **Enter** | Left click (hold to drag) |
+| **Tap Ctrl** (on its own) | Switch profile: **WASD mode** $\leftrightarrow$ **Arrow keys mode** |
+| **[WASD Mode]** | `W / A / S / D` = Move cursor, `Z` = Left click (hold to drag) |
+| **[Arrow Keys Mode]** | `Arrows` = Move cursor, `Enter` = Left click (hold to drag) |
 | **X** | Right click |
 | **C** | Middle click |
-| **Arrow keys** | Move the cursor (speeds up while held) |
-| **PageUp / PageDown** | Scroll |
+| **PageUp / PageDown** | Scroll wheel up / down |
+| **Shift+F8** | Quit |
 
-By default, keys keep their normal function **and** act as the mouse (`PASS_THROUGH = True`). For example, Enter still presses Enter and also left-clicks.
+By default, keys keep their normal function **and** act as the mouse (`PASS_THROUGH = True`).
 
-**How the Shift toggle works:** it only counts as a toggle if you press and release Shift *by itself* within 0.35 s. Typing capitals (Shift+letter), Shift+click, Shift+scroll, or holding Shift down never toggles. Shift always works normally in your apps.
+**How toggles work:**
+- **Shift Tap:** Tapping Shift alone within 0.35 s toggles mouse mode. Typing capitals (Shift+letter), Shift-clicking, or holding Shift never triggers the toggle.
+- **Ctrl Tap:** Tapping Ctrl alone within 0.35 s toggles between the WASD profile and the Arrow keys profile. Common shortcuts (`Ctrl+C`, `Ctrl+V`, etc.) never switch profiles.
 
 ## Configuration
 
